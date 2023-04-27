@@ -1,0 +1,236 @@
+-- using accountadmin role 
+USE ROLE accountadmin;
+
+-- creating admin role
+create or replace role Admin;
+
+-- creating pii role
+create or replace role pii;
+
+-- creating hierarchy as per given graph
+GRANT ROLE admin TO ROLE accountadmin;
+GRANT ROLE pii TO ROLE accountadmin;
+
+-- granting create role privilage to admin role
+GRANT CREATE ROLE ON ACCOUNT TO  admin;
+
+
+
+
+show roles;
+
+USE ROLE accountadmin;
+
+-- Creating warehouse from accountadmin role
+CREATE OR REPLACE WAREHOUSE assignment_wh WITH
+WAREHOUSE_SIZE='MEDIUM'
+AUTO_SUSPEND = 180
+AUTO_RESUME = TRUE
+INITIALLY_SUSPENDED=TRUE
+MIN_CLUSTER_COUNT = 1
+MAX_CLUSTER_COUNT = 3;
+show databases;
+
+-- using created dataware house
+USE WAREHOUSE assignment_wh;
+
+-- granting privileges on warehouse to admin role
+GRANT ALL PRIVILEGES ON warehouse assignment_wh TO ROLE ADMIN;
+
+
+-- granting create database privilage to admin role from accountadmin role
+GRANT CREATE DATABASE ON ACCOUNT TO admin;
+
+-- shifting to admin role
+use role admin;
+
+
+USE WAREHOUSE assignment_wh;
+
+-- creating database from admin role
+CREATE or replace DATABASE assignment_db;
+show databases;
+
+-- from admin role creating developer role
+create or replace role Developer;
+
+-- creating hierarchy
+GRANT ROLE developer TO ROLE admin;
+
+
+-- creating schema from admin role
+CREATE SCHEMA my_schema;
+show schemas;
+
+-- creating employee local table
+create or replace table employee_local(
+  employee_id number,
+  first_name string,
+  last_name string,
+  email string,
+  phone_number string,
+  hire_date date,
+  job_id string,
+  salary number,
+  commission_pct string,
+  MANAGER_ID number,
+  DEPARTMENT_ID number,
+  elt_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+  elt_by varchar default 'assignment',
+  file_name varchar
+  
+);
+
+-- creating variant table
+create or replace table emoployee_variant(
+  single_row variant
+);
+show stages;
+
+-- drop stage my_stage_local_csv;
+
+-- Creating internal stage for table from local CSV file
+CREATE OR REPLACE STAGE my_stage_local_csv
+  file_format = (type = 'CSV' FIELD_DELIMITER = ',' SKIP_HEADER = 1);
+
+  
+-- creating internal stage for variant table
+CREATE OR REPLACE STAGE my_stage_variant
+file_format = (type = 'json');
+
+-- listing internal stage
+list @my_stage_local_csv;
+
+-- running queries on the internal and variant table
+desc table emoployee_variant;
+select * from employee_local limit 5;
+select * from emoployee_variant;
+
+
+-- creating file format for parquet file
+CREATE OR REPLACE FILE FORMAT my_parquet_format
+  TYPE = PARQUET;
+
+-- creating internal stage for parquet file
+CREATE OR REPLACE STAGE my_stage_parquet
+file_format = my_parquet_format;
+
+-- running query on parquet stage to get infer shema
+SELECT *
+  FROM TABLE(
+    INFER_SCHEMA(
+      LOCATION=>'@my_stage_parquet'
+      , FILE_FORMAT=>'my_parquet_format'
+      )
+    );
+
+SELECT * FROM @my_stage_parquet/userdata1.parquet;
+
+
+
+-- creating table for external stage
+create or replace table employee_external(
+  employee_id number,
+  first_name string,
+  last_name string,
+  email string,
+  phone_number string,
+  hire_date date,
+  job_id string,
+  salary number,
+  commission_pct string,
+  MANAGER_ID number,
+  DEPARTMENT_ID number,
+  elt_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
+  elt_by varchar default 'assignment',
+  file_name varchar
+  
+);
+
+-- creating file format for external stage
+CREATE OR REPLACE FILE FORMAT external_file
+  TYPE = CSV
+  FIELD_DELIMITER = ','
+  SKIP_HEADER = 1;
+
+
+USE ROLE accountadmin;
+
+-- granting create integration permission to admin role
+GRANT CREATE INTEGRATION ON ACCOUNT TO admin WITH GRANT OPTION;
+
+ USE ROLE admin;
+ -- creating integration to integrate snowflake with aws s3
+CREATE or replace STORAGE INTEGRATION s3_integration
+type = external_stage
+storage_provider = s3
+enabled = true
+storage_aws_role_arn = 'arn:aws:iam::366068070173:role/s3_chakradhar'
+storage_allowed_locations = ('s3://assignment-snowflake-praneeth/employees.csv');
+
+DESC INTEGRATION s3_integration;
+
+-- creating external stage
+CREATE OR REPLACE STAGE external_stage
+URL = 's3://assignment-snowflake-praneeth/employees.csv'
+STORAGE_INTEGRATION = s3_integration
+FILE_FORMAT = external_file;
+
+list @external_stage;
+
+-- copying data into table from external stage
+copy into employee_external(employee_id,first_name,last_name,email,phone_number,hire_date,job_id,salary,commission_pct,MANAGER_ID,DEPARTMENT_ID,file_name) from (select $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,METADATA$FILENAME FROM @external_stage (file_format=> external_file))   on_error='skip_file';
+
+select * from employee_external limit 10;
+
+
+use role accountadmin;
+
+-- granting masking policy permission to admin role
+GRANT CREATE MASKING POLICY on SCHEMA assignment_db.my_schema to ROLE admin;
+GRANT APPLY MASKING POLICY on ACCOUNT to ROLE admin;
+
+use role admin;
+
+-- creating masking policy as per requirements
+CREATE OR REPLACE MASKING POLICY email_mask AS (val string) returns string ->
+  CASE
+    WHEN current_role() ='PII' THEN VAL
+    ELSE '*********'
+  END;
+
+-- applying masking policy on email column of internal table
+ALTER TABLE IF EXISTS employee_local MODIFY COLUMN email SET MASKING POLICY email_mask;
+select * from employee_local limit 5;
+
+-- applying masking policy on phone number column of internal table
+ALTER TABLE IF EXISTS employee_local MODIFY COLUMN phone_number SET MASKING POLICY email_mask;
+select * from employee_local limit 5;
+
+
+-- applying masking policy on email column of external table 
+ALTER TABLE IF EXISTS employee_external MODIFY COLUMN email SET MASKING POLICY email_mask;
+select * from employee_external limit 5;
+
+-- applying masking policy on phone number column of external table
+ALTER TABLE IF EXISTS employee_external MODIFY COLUMN phone_number SET MASKING POLICY email_mask ;
+select * from employee_external limit 5;
+
+
+
+use role accountadmin;
+-- granting different permissions to pii role
+GRANT ALL PRIVILEGES ON warehouse assignment_wh TO ROLE pii;
+grant usage on database assignment_db to role pii;
+grant usage on schema assignment_db.my_schema to role pii;
+GRANT SELECT ON ALL TABLES IN SCHEMA assignment_db.my_schema to ROLE pii;
+grant select on future tables in schema assignment_db.my_schema to role pii;
+
+use role pii;
+show tables;
+-- running queries on tables from pii
+select current_role();
+select * from employee_local limit 5;
+select * from employee_external limit 5;
+
+
